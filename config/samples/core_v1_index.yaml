@@ -1,0 +1,9 @@
+apiVersion: core.index.demo/v1
+kind: Index
+metadata:
+  labels:
+    app.kubernetes.io/name: index
+    app.kubernetes.io/managed-by: kustomize
+  name: index-sample
+spec:
+  # TODO(user): Add fields here
