@@ -31,32 +31,16 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
-
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	// for watching resources
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	// "sigs.k8s.io/controller-runtime/pkg/source"
 )
 
-// FOR LOCAL TESTING!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-type ResourceNamespace struct {
-	Namespace string              `json:"namespace,omitempty"`
-	Resources map[string][]string `json:"resources,omitempty"`
-}
-
-type IndexSpec struct {
-	ServiceAccount string                       `json:"serviceAccount,omitempty"`
-	NamespaceMap   map[string]ResourceNamespace `json:"namespaceMap,omitempty"`
-}
-
-// ABOVE FOR LOCAL TESTING: wtihout deploying a cr
-
 // IndexReconciler reconciles a Index object
 type IndexReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
-	// NamespaceMap map[string]ResourceNamespace // remove later
-	IndexSpecs  map[string]IndexSpec // remove
-	Initialized bool                 // remove later
 }
 
 func (r *IndexReconciler) Init(ctx context.Context) error {
@@ -64,10 +48,6 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 	// var test corev1api.Index
 
 	log := log.FromContext(ctx)
-
-	// List all RoleBindings that are not in kube-system, kube-public, or local-path-storage namespaces
-	r.IndexSpecs = make(map[string]IndexSpec)
-
 	// List all RoleBindings that are not in kube-system, kube-public, or local-path-storage namespaces
 	var roleBindings rbacv1.RoleBindingList
 	err := r.List(ctx, &roleBindings)
@@ -76,86 +56,83 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 		return err
 	}
 
-	// Process RoleBindings to populate IndexSpec instances
+	// Process RoleBindings to ensure Index CRs exist and update them
 	for _, roleBinding := range roleBindings.Items {
 		if roleBinding.Namespace == "kube-system" || roleBinding.Namespace == "kube-public" || roleBinding.Namespace == "local-path-storage" {
 			continue
 		}
 
-		namespace := roleBinding.Namespace
-
+		// Iterate over subjects in each RoleBinding to process ServiceAccounts
 		for _, subject := range roleBinding.Subjects {
 			if subject.Kind == "ServiceAccount" {
 				serviceAccountName := subject.Name
+				indexName := fmt.Sprintf("index-%s", serviceAccountName)
 
-				indexSpec, exists := r.IndexSpecs[serviceAccountName]
-				if !exists {
-					indexSpec = IndexSpec{
-						ServiceAccount: serviceAccountName,
-						NamespaceMap:   make(map[string]ResourceNamespace),
+				// Check if an Index CR exists in the default namespace for this service account
+				var existingIndex corev1api.Index
+				err := r.Get(ctx, client.ObjectKey{Name: indexName, Namespace: "default"}, &existingIndex)
+				if err != nil && client.IgnoreNotFound(err) == nil {
+					// Create a new Index CR in the default namespace if it doesn't exist
+					newIndex := &corev1api.Index{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      indexName,
+							Namespace: "default",
+						},
+						Spec: corev1api.IndexSpec{
+							ServiceAccount: serviceAccountName,
+							NamespaceMap:   make(map[string]corev1api.ResourceNamespace),
+						},
 					}
+					err = r.Create(ctx, newIndex)
+					if err != nil {
+						log.Error(err, fmt.Sprintf("Failed to create Index CR for ServiceAccount: %s", serviceAccountName))
+						continue
+					}
+					log.Info(fmt.Sprintf("Created new Index CR: %s for ServiceAccount: %s", indexName, serviceAccountName))
+					existingIndex = *newIndex
+				} else if err != nil {
+					log.Error(err, fmt.Sprintf("Failed to get Index CR: %s", indexName))
+					continue
 				}
 
+				// Ensure that the NamespaceMap is initialized
+				if existingIndex.Spec.NamespaceMap == nil {
+					existingIndex.Spec.NamespaceMap = make(map[string]corev1api.ResourceNamespace)
+				}
+
+				namespace := roleBinding.Namespace
+
 				// Initialize the namespace entry in the NamespaceMap if it doesn't exist
-				if _, exists := indexSpec.NamespaceMap[namespace]; !exists {
-					indexSpec.NamespaceMap[namespace] = ResourceNamespace{
+				if _, exists := existingIndex.Spec.NamespaceMap[namespace]; !exists {
+					existingIndex.Spec.NamespaceMap[namespace] = corev1api.ResourceNamespace{
 						Namespace: namespace,
 						Resources: make(map[string][]string),
 					}
 				}
 
-				// List Pods in the current namespace
 				var pods corev1.PodList
-				err := r.List(ctx, &pods, &client.ListOptions{Namespace: namespace})
+				err = r.List(ctx, &pods, &client.ListOptions{Namespace: namespace})
 				if err != nil {
 					log.Error(err, fmt.Sprintf("Failed to list pods in namespace: %s", namespace))
 					continue
 				}
+
+				activePods := make([]string, 0)
 				for _, pod := range pods.Items {
-					indexSpec.NamespaceMap[namespace].Resources["Pod"] = append(indexSpec.NamespaceMap[namespace].Resources["Pod"], pod.Name)
+					activePods = append(activePods, pod.Name)
 				}
-				r.IndexSpecs[serviceAccountName] = indexSpec
-			}
-		}
-	}
+				existingPods := existingIndex.Spec.NamespaceMap[namespace].Resources["Pod"]
+				if len(existingPods) != len(activePods) {
+					existingIndex.Spec.NamespaceMap[namespace].Resources["Pod"] = activePods
 
-	// log.Info("Initialized IndexSpecs", "IndexSpecs", r.IndexSpecs)
-
-	r.Initialized = true
-
-	log.Info(fmt.Sprintf("%d", len(r.IndexSpecs)))
-	fmt.Println()
-	fmt.Println()
-	fmt.Println(r.IndexSpecs)
-	fmt.Println()
-	fmt.Println()
-	return nil
-}
-
-// Updating pod data
-func (r *IndexReconciler) UpdateServiceAccountResources(ctx context.Context, pod *corev1.Pod) error {
-	log := log.FromContext(ctx)
-	namespace := pod.Namespace
-	podName := pod.Name
-	fmt.Println(len(r.IndexSpecs))
-	for serviceAccount, indexSpec := range r.IndexSpecs {
-		if resourceNamespace, exists := indexSpec.NamespaceMap[namespace]; exists {
-			// Check if the pod is already in the list to avoid duplicates
-			podList := resourceNamespace.Resources["Pod"]
-			podExists := false
-			for _, existingPod := range podList {
-				if existingPod == podName {
-					podExists = true
-					break
+					// Update the Index CR with the updated NamespaceMap
+					err = r.Update(ctx, &existingIndex)
+					if err != nil {
+						log.Error(err, fmt.Sprintf("Failed to update Index CR: %s", indexName))
+					} else {
+						log.Info(fmt.Sprintf("Updated Index CR: %s for ServiceAccount: %s", indexName, serviceAccountName))
+					}
 				}
-			}
-
-			if !podExists {
-				resourceNamespace.Resources["Pod"] = append(resourceNamespace.Resources["Pod"], podName)
-				indexSpec.NamespaceMap[namespace] = resourceNamespace
-				r.IndexSpecs[serviceAccount] = indexSpec
-
-				log.Info(fmt.Sprintf("Updated IndexSpec for ServiceAccount: %s with new pod: %s in Namespace: %s", serviceAccount, podName, namespace))
 			}
 		}
 	}
@@ -167,47 +144,15 @@ func (r *IndexReconciler) UpdateServiceAccountResources(ctx context.Context, pod
 // +kubebuilder:rbac:groups=core.index.demo,resources=indices/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.index.demo,resources=indices/finalizers,verbs=update
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the Index object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.18.4/pkg/reconcile
 func (r *IndexReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 
-	// checking initialization
-	if !r.Initialized {
-		if err := r.Init(ctx); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	fmt.Println("REQUEST IS    ", req)
-	var pod corev1.Pod
-	err := r.Get(ctx, req.NamespacedName, &pod)
-
-	// #TODO: FIX DELETION EVENTS.
+	err := r.Init(ctx)
 	if err != nil {
-		log.Info(fmt.Sprintf("Welp pod %s deleted in %s", pod.Name, pod.Namespace))
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		log.Error(err, "Failed to initialize Index resources")
+		return ctrl.Result{}, err
 	}
 
-	if pod.Status.Phase == corev1.PodRunning {
-		return ctrl.Result{}, nil
-	}
-
-	// Skip the loop for deeltion events -> ObjectMeta.DeletionTimeStamp
-	if pod.ObjectMeta.DeletionTimestamp != nil || pod.ObjectMeta.Generation > 1 { // ObjectMeta.Generation : 0 or -ve for deleted, >1 for pods updated more than once
-		return ctrl.Result{}, nil
-	}
-	r.UpdateServiceAccountResources(ctx, &pod)
-	log.Info(fmt.Sprintf("Yay Pod created in %s called %s", pod.Namespace, pod.Name))
-
-	fmt.Println(r.IndexSpecs)
 	return ctrl.Result{}, nil
 }
 
