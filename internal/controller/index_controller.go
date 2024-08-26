@@ -61,6 +61,8 @@ type IndexReconciler struct {
 
 func (r *IndexReconciler) Init(ctx context.Context) error {
 	fmt.Println("This happens on inittttttttttt")
+	// var test corev1api.Index
+
 	log := log.FromContext(ctx)
 
 	// List all RoleBindings that are not in kube-system, kube-public, or local-path-storage namespaces
@@ -86,10 +88,8 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 			if subject.Kind == "ServiceAccount" {
 				serviceAccountName := subject.Name
 
-				// Check if the service account already has an IndexSpec
 				indexSpec, exists := r.IndexSpecs[serviceAccountName]
 				if !exists {
-					// Initialize a new IndexSpec for the service account
 					indexSpec = IndexSpec{
 						ServiceAccount: serviceAccountName,
 						NamespaceMap:   make(map[string]ResourceNamespace),
@@ -111,22 +111,18 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 					log.Error(err, fmt.Sprintf("Failed to list pods in namespace: %s", namespace))
 					continue
 				}
-
-				// Associate the Pods with the namespace in the IndexSpec
 				for _, pod := range pods.Items {
 					indexSpec.NamespaceMap[namespace].Resources["Pod"] = append(indexSpec.NamespaceMap[namespace].Resources["Pod"], pod.Name)
 				}
-
-				// Update the IndexSpec in the map
 				r.IndexSpecs[serviceAccountName] = indexSpec
 			}
 		}
 	}
 
-	// Log the initialized IndexSpecs for debugging purposes
 	// log.Info("Initialized IndexSpecs", "IndexSpecs", r.IndexSpecs)
 
 	r.Initialized = true
+
 	log.Info(fmt.Sprintf("%d", len(r.IndexSpecs)))
 	fmt.Println()
 	fmt.Println()
@@ -189,55 +185,35 @@ func (r *IndexReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 			return ctrl.Result{}, err
 		}
 	}
-// Fetch the Pod instance
+
+	fmt.Println("REQUEST IS    ", req)
 	var pod corev1.Pod
 	err := r.Get(ctx, req.NamespacedName, &pod)
 
+	// #TODO: FIX DELETION EVENTS.
 	if err != nil {
-		// If the Pod was not found, it's likely a deletion event
 		log.Info(fmt.Sprintf("Welp pod %s deleted in %s", pod.Name, pod.Namespace))
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	// to check if it's a preexisting pod:
+
 	if pod.Status.Phase == corev1.PodRunning {
 		return ctrl.Result{}, nil
 	}
 
-	// if the pod is being deleted
-	if pod.ObjectMeta.DeletionTimestamp != nil || pod.ObjectMeta.Generation > 1 {
+	// Skip the loop for deeltion events -> ObjectMeta.DeletionTimeStamp
+	if pod.ObjectMeta.DeletionTimestamp != nil || pod.ObjectMeta.Generation > 1 { // ObjectMeta.Generation : 0 or -ve for deleted, >1 for pods updated more than once
 		return ctrl.Result{}, nil
 	}
 	r.UpdateServiceAccountResources(ctx, &pod)
 	log.Info(fmt.Sprintf("Yay Pod created in %s called %s", pod.Namespace, pod.Name))
-	
 
 	fmt.Println(r.IndexSpecs)
-
-	//RoleBindings:
-	// var RoleBindings rbacv1.RoleBindingList
-	// err = r.List(ctx, &RoleBindings)
-	// if err != nil {
-	// 	log.Error(err, "Error Listing RoleBindings")
-	// } else {
-	// 	for _, rb := range RoleBindings.Items {
-	// 		// fmt.Println("Rolebindings : ", rb.Name, "Namespace: ", rb.Namespace)
-	// 		// fmt.Println(rb.Subjects)
-	// 		// fmt.Println(rb.RoleRef.Name)
-	// 		for _, sa := range rb.Subjects {
-	// 			fmt.Println(sa.Kind, " : ", sa.Name)
-	// 		}
-	// 	}
-	// }
 	return ctrl.Result{}, nil
-	// TODO(user): your logic here
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *IndexReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// err := r.Init(context.Background())
-	// if err != nil {
-	// 	return err
-	// }
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1api.Index{}).
 		Watches(
