@@ -29,6 +29,7 @@ import (
 
 	corev1api "controller/index/api/v1"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -44,35 +45,31 @@ type IndexReconciler struct {
 }
 
 func (r *IndexReconciler) Init(ctx context.Context) error {
-	fmt.Println("This happens on inittttttttttt")
+	fmt.Println("This happens on init")
 	// var test corev1api.Index
 
 	log := log.FromContext(ctx)
-	// List all RoleBindings that are not in kube-system, kube-public, or local-path-storage namespaces
 	var roleBindings rbacv1.RoleBindingList
 	err := r.List(ctx, &roleBindings)
 	if err != nil {
 		log.Error(err, "Failed to list role bindings")
 		return err
 	}
-
-	// Process RoleBindings to ensure Index CRs exist and update them
+	//kube-system,   kube-public,  local-path-storage
 	for _, roleBinding := range roleBindings.Items {
 		if roleBinding.Namespace == "kube-system" || roleBinding.Namespace == "kube-public" || roleBinding.Namespace == "local-path-storage" {
 			continue
 		}
-
-		// Iterate over subjects in each RoleBinding to process ServiceAccounts
 		for _, subject := range roleBinding.Subjects {
 			if subject.Kind == "ServiceAccount" {
 				serviceAccountName := subject.Name
 				indexName := fmt.Sprintf("index-%s", serviceAccountName)
 
-				// Check if an Index CR exists in the default namespace for this service account
+
 				var existingIndex corev1api.Index
 				err := r.Get(ctx, client.ObjectKey{Name: indexName, Namespace: "default"}, &existingIndex)
 				if err != nil && client.IgnoreNotFound(err) == nil {
-					// Create a new Index CR in the default namespace if it doesn't exist
+					// make new CR
 					newIndex := &corev1api.Index{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      indexName,
@@ -94,15 +91,11 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 					log.Error(err, fmt.Sprintf("Failed to get Index CR: %s", indexName))
 					continue
 				}
-
-				// Ensure that the NamespaceMap is initialized
 				if existingIndex.Spec.NamespaceMap == nil {
-					existingIndex.Spec.NamespaceMap = make(map[string]corev1api.ResourceNamespace)
+					existingIndex.Spec.NamespaceMap = make(map[string]corev1api.ResourceNamespace)  // NamespaceMap is <nil> fix
 				}
 
 				namespace := roleBinding.Namespace
-
-				// Initialize the namespace entry in the NamespaceMap if it doesn't exist
 				if _, exists := existingIndex.Spec.NamespaceMap[namespace]; !exists {
 					existingIndex.Spec.NamespaceMap[namespace] = corev1api.ResourceNamespace{
 						Namespace: namespace,
@@ -124,15 +117,43 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 				existingPods := existingIndex.Spec.NamespaceMap[namespace].Resources["Pod"]
 				if len(existingPods) != len(activePods) {
 					existingIndex.Spec.NamespaceMap[namespace].Resources["Pod"] = activePods
-
-					// Update the Index CR with the updated NamespaceMap
-					err = r.Update(ctx, &existingIndex)
-					if err != nil {
-						log.Error(err, fmt.Sprintf("Failed to update Index CR: %s", indexName))
-					} else {
-						log.Info(fmt.Sprintf("Updated Index CR: %s for ServiceAccount: %s", indexName, serviceAccountName))
-					}
 				}
+
+				var deployments appsv1.DeploymentList
+				if err = r.List(ctx, &deployments, &client.ListOptions{Namespace: namespace}); err != nil {
+					log.Error(err, "Failed to list deployments")
+					continue
+				}
+				activeDeployments := make([]string, 0)
+				for _, deployment := range deployments.Items {
+					activeDeployments = append(activeDeployments, deployment.Name)
+				}
+				existingDeployments := existingIndex.Spec.NamespaceMap[namespace].Resources["Deployments"]
+				if len(existingDeployments) != len(activeDeployments) {
+					existingIndex.Spec.NamespaceMap[namespace].Resources["Deployments"] = activeDeployments
+				}
+
+				var services corev1.ServiceList
+				err = r.List(ctx, &services, &client.ListOptions{Namespace: namespace})
+				if err != nil {
+					log.Error(err, fmt.Sprintf("Failed to list services in namespace: %s", namespace))
+					continue
+				}
+				activeServices := make([]string, 0)
+				for _, service := range services.Items {
+					activeServices = append(activeServices, service.Name)
+				}
+				existingServices := existingIndex.Spec.NamespaceMap[namespace].Resources["Service"]
+				if len(existingServices) != len(activeServices) {
+					existingIndex.Spec.NamespaceMap[namespace].Resources["Service"] = activeServices
+				}
+
+				err = r.Update(ctx, &existingIndex)
+				if err != nil {
+					log.Error(err, fmt.Sprintf("Failed to update Index CR: %s", indexName))
+				} //  else {
+				// 	log.Info(fmt.Sprintf("Updated Index CR: %s for ServiceAccount: %s", indexName, serviceAccountName))
+				// }
 			}
 		}
 	}
@@ -158,11 +179,18 @@ func (r *IndexReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *IndexReconciler) SetupWithManager(mgr ctrl.Manager) error {
-
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1api.Index{}).
 		Watches(
 			&corev1.Pod{},
+			&handler.EnqueueRequestForObject{},
+		).
+		Watches(
+			&appsv1.Deployment{},
+			&handler.EnqueueRequestForObject{},
+		).
+		Watches(
+			&corev1.Service{},
 			&handler.EnqueueRequestForObject{},
 		).
 		Complete(r)
