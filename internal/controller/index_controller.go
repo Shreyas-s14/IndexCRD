@@ -61,10 +61,27 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 		for _, subject := range roleBinding.Subjects {
 			if subject.Kind == "ServiceAccount" {
 				serviceAccountName := subject.Name
+				namespace := subject.Namespace
 				indexName := fmt.Sprintf("index-%s", serviceAccountName)
 
+				// Check if the ServiceAccount exists in the subject's namespace
+				var serviceAccount corev1.ServiceAccount
+				err := r.Get(ctx, client.ObjectKey{Name: serviceAccountName, Namespace: namespace}, &serviceAccount)
+				if err != nil && client.IgnoreNotFound(err) == nil {
+					var existingIndex corev1api.Index
+					err = r.Get(ctx, client.ObjectKey{Name: indexName, Namespace: "default"}, &existingIndex)
+					if err == nil {
+						err = r.Delete(ctx, &existingIndex)
+						if err != nil {
+							log.Error(err, fmt.Sprintf("Failed to delete Index CR: %s", indexName))
+						} else {
+							log.Info(fmt.Sprintf("Deleted Index CR: %s for ServiceAccount: %s", indexName, serviceAccountName))
+						}
+					}
+					continue
+				}
 				var existingIndex corev1api.Index
-				err := r.Get(ctx, client.ObjectKey{Name: indexName, Namespace: "default"}, &existingIndex)
+				err = r.Get(ctx, client.ObjectKey{Name: indexName, Namespace: "default"}, &existingIndex)
 				if err != nil && client.IgnoreNotFound(err) == nil {
 					newIndex := &corev1api.Index{
 						ObjectMeta: metav1.ObjectMeta{
@@ -93,8 +110,7 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 				if existingIndex.Spec.NamespaceMap == nil {
 					existingIndex.Spec.NamespaceMap = make(map[string]corev1api.ResourceNamespace) // NamespaceMap is <nil> fix
 				}
-
-				namespace := roleBinding.Namespace
+				namespace = roleBinding.Namespace
 				nsResource, exists := existingIndex.Spec.NamespaceMap[namespace]
 				if !exists || nsResource.Resources == nil {
 					nsResource = corev1api.ResourceNamespace{
