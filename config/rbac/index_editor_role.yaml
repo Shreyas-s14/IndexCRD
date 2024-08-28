@@ -25,3 +25,4 @@ rules:
   - indices/status
   verbs:
   - get
+  - update

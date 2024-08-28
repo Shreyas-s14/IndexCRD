@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	// "encoding/json"
 	"fmt"
 	// "strings"
 
@@ -46,9 +45,8 @@ type IndexReconciler struct {
 
 func (r *IndexReconciler) Init(ctx context.Context) error {
 	fmt.Println("This happens on init")
-	// var test corev1api.Index
-
 	log := log.FromContext(ctx)
+
 	var roleBindings rbacv1.RoleBindingList
 	err := r.List(ctx, &roleBindings)
 	if err != nil {
@@ -65,11 +63,9 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 				serviceAccountName := subject.Name
 				indexName := fmt.Sprintf("index-%s", serviceAccountName)
 
-
 				var existingIndex corev1api.Index
 				err := r.Get(ctx, client.ObjectKey{Name: indexName, Namespace: "default"}, &existingIndex)
 				if err != nil && client.IgnoreNotFound(err) == nil {
-					// make new CR
 					newIndex := &corev1api.Index{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      indexName,
@@ -78,6 +74,9 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 						Spec: corev1api.IndexSpec{
 							ServiceAccount: serviceAccountName,
 							NamespaceMap:   make(map[string]corev1api.ResourceNamespace),
+						},
+						Status: corev1api.IndexStatus{
+							LastUpdated: metav1.Now(),
 						},
 					}
 					err = r.Create(ctx, newIndex)
@@ -92,12 +91,13 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 					continue
 				}
 				if existingIndex.Spec.NamespaceMap == nil {
-					existingIndex.Spec.NamespaceMap = make(map[string]corev1api.ResourceNamespace)  // NamespaceMap is <nil> fix
+					existingIndex.Spec.NamespaceMap = make(map[string]corev1api.ResourceNamespace) // NamespaceMap is <nil> fix
 				}
 
 				namespace := roleBinding.Namespace
-				if _, exists := existingIndex.Spec.NamespaceMap[namespace]; !exists {
-					existingIndex.Spec.NamespaceMap[namespace] = corev1api.ResourceNamespace{
+				nsResource, exists := existingIndex.Spec.NamespaceMap[namespace]
+				if !exists || nsResource.Resources == nil {
+					nsResource = corev1api.ResourceNamespace{
 						Namespace: namespace,
 						Resources: make(map[string][]string),
 					}
@@ -114,9 +114,9 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 				for _, pod := range pods.Items {
 					activePods = append(activePods, pod.Name)
 				}
-				existingPods := existingIndex.Spec.NamespaceMap[namespace].Resources["Pod"]
+				existingPods := nsResource.Resources["Pod"]
 				if len(existingPods) != len(activePods) {
-					existingIndex.Spec.NamespaceMap[namespace].Resources["Pod"] = activePods
+					nsResource.Resources["Pod"] = activePods
 				}
 
 				var deployments appsv1.DeploymentList
@@ -128,9 +128,9 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 				for _, deployment := range deployments.Items {
 					activeDeployments = append(activeDeployments, deployment.Name)
 				}
-				existingDeployments := existingIndex.Spec.NamespaceMap[namespace].Resources["Deployments"]
+				existingDeployments := nsResource.Resources["Deployment"]
 				if len(existingDeployments) != len(activeDeployments) {
-					existingIndex.Spec.NamespaceMap[namespace].Resources["Deployments"] = activeDeployments
+					nsResource.Resources["Deployment"] = activeDeployments
 				}
 
 				var services corev1.ServiceList
@@ -143,17 +143,18 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 				for _, service := range services.Items {
 					activeServices = append(activeServices, service.Name)
 				}
-				existingServices := existingIndex.Spec.NamespaceMap[namespace].Resources["Service"]
+				existingServices := nsResource.Resources["Service"]
 				if len(existingServices) != len(activeServices) {
-					existingIndex.Spec.NamespaceMap[namespace].Resources["Service"] = activeServices
+					nsResource.Resources["Service"] = activeServices
 				}
+
+				existingIndex.Spec.NamespaceMap[namespace] = nsResource
+				existingIndex.Status.LastUpdated = metav1.Now()
 
 				err = r.Update(ctx, &existingIndex)
 				if err != nil {
-					log.Error(err, fmt.Sprintf("Failed to update Index CR: %s", indexName))
-				} //  else {
-				// 	log.Info(fmt.Sprintf("Updated Index CR: %s for ServiceAccount: %s", indexName, serviceAccountName))
-				// }
+					log.Error(err, "Error Updating the CR")
+				}
 			}
 		}
 	}
@@ -191,6 +192,10 @@ func (r *IndexReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		).
 		Watches(
 			&corev1.Service{},
+			&handler.EnqueueRequestForObject{},
+		).
+		Watches(
+			&rbacv1.RoleBinding{},
 			&handler.EnqueueRequestForObject{},
 		).
 		Complete(r)
