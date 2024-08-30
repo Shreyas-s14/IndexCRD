@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
+
 	// "strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,6 +34,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	// for watching resources
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	// "sigs.k8s.io/controller-runtime/pkg/source"
@@ -43,15 +46,26 @@ type IndexReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-func (r *IndexReconciler) Init(ctx context.Context) error {
-	fmt.Println("This happens on init")
+// +kubebuilder:rbac:groups=core.index.demo,resources=indices,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core.index.demo,resources=indices/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=core.index.demo,resources=indices/finalizers,verbs=update
+
+func (r *IndexReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
+
+	// PREV :
+	// err := r.Init(ctx)
+	// if err != nil {
+	// 	log.Error(err, "Failed to initialize Index resources")
+	// 	return ctrl.Result{}, err
+	// }
 
 	var roleBindings rbacv1.RoleBindingList
 	err := r.List(ctx, &roleBindings)
 	if err != nil {
 		log.Error(err, "Failed to list role bindings")
-		return err
+		return ctrl.Result{RequeueAfter: time.Second}, err
+
 	}
 	//kube-system,   kube-public,  local-path-storage
 	for _, roleBinding := range roleBindings.Items {
@@ -78,7 +92,8 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 							log.Info(fmt.Sprintf("Deleted Index CR: %s for ServiceAccount: %s", indexName, serviceAccountName))
 						}
 					}
-					continue
+					// continue
+					return ctrl.Result{RequeueAfter: time.Second}, err
 				}
 				var existingIndex corev1api.Index
 				err = r.Get(ctx, client.ObjectKey{Name: indexName, Namespace: "default"}, &existingIndex)
@@ -99,13 +114,23 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 					err = r.Create(ctx, newIndex)
 					if err != nil {
 						log.Error(err, fmt.Sprintf("Failed to create Index CR for ServiceAccount: %s", serviceAccountName))
-						continue
+						// continue
+						return ctrl.Result{RequeueAfter: time.Second}, err
 					}
 					log.Info(fmt.Sprintf("Created new Index CR: %s for ServiceAccount: %s", indexName, serviceAccountName))
-					existingIndex = *newIndex
+					err = r.Get(ctx, client.ObjectKey{Name: indexName, Namespace: "default"}, &existingIndex)
+					if err != nil {
+						// fmt.Println("110: error: ", err)
+						log.Error(err, "Get After Create, failed")
+						// panic("EXIT")
+						return ctrl.Result{RequeueAfter: time.Second}, err
+					}
+					// existingIndex = *newIndex
 				} else if err != nil {
 					log.Error(err, fmt.Sprintf("Failed to get Index CR: %s", indexName))
-					continue
+					// continue
+					return ctrl.Result{RequeueAfter: time.Second}, err
+
 				}
 				if existingIndex.Spec.NamespaceMap == nil {
 					existingIndex.Spec.NamespaceMap = make(map[string]corev1api.ResourceNamespace) // NamespaceMap is <nil> fix
@@ -123,7 +148,10 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 				err = r.List(ctx, &pods, &client.ListOptions{Namespace: namespace})
 				if err != nil {
 					log.Error(err, fmt.Sprintf("Failed to list pods in namespace: %s", namespace))
-					continue
+					// continue
+					return ctrl.Result{RequeueAfter: time.Second}, err
+
+					// return ctrl.Result{}, err
 				}
 
 				activePods := make([]string, 0)
@@ -132,13 +160,16 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 				}
 				existingPods := nsResource.Resources["Pod"]
 				if len(existingPods) != len(activePods) {
+					log.Info(fmt.Sprintf("Pod list updated in index-%s", serviceAccount.Name))
 					nsResource.Resources["Pod"] = activePods
 				}
 
 				var deployments appsv1.DeploymentList
 				if err = r.List(ctx, &deployments, &client.ListOptions{Namespace: namespace}); err != nil {
 					log.Error(err, "Failed to list deployments")
-					continue
+					// continue
+					return ctrl.Result{RequeueAfter: time.Second}, err
+
 				}
 				activeDeployments := make([]string, 0)
 				for _, deployment := range deployments.Items {
@@ -146,6 +177,7 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 				}
 				existingDeployments := nsResource.Resources["Deployment"]
 				if len(existingDeployments) != len(activeDeployments) {
+					log.Info(fmt.Sprintf("Deployment list updated in index-%s", serviceAccount.Name))
 					nsResource.Resources["Deployment"] = activeDeployments
 				}
 
@@ -153,7 +185,9 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 				err = r.List(ctx, &services, &client.ListOptions{Namespace: namespace})
 				if err != nil {
 					log.Error(err, fmt.Sprintf("Failed to list services in namespace: %s", namespace))
-					continue
+					// continue
+					return ctrl.Result{RequeueAfter: time.Second}, err
+
 				}
 				activeServices := make([]string, 0)
 				for _, service := range services.Items {
@@ -161,34 +195,24 @@ func (r *IndexReconciler) Init(ctx context.Context) error {
 				}
 				existingServices := nsResource.Resources["Service"]
 				if len(existingServices) != len(activeServices) {
+					log.Info(fmt.Sprintf("Services list updated in index-%s", serviceAccount.Name))
 					nsResource.Resources["Service"] = activeServices
 				}
-
 				existingIndex.Spec.NamespaceMap[namespace] = nsResource
+				err = r.Update(ctx, &existingIndex)
+				// if err != nil {
+				// 	err = r.Status().Update(ctx, &existingIndex)
+				// 	fmt.Println(err)
+				// }
+				// err = r.Get(ctx, client.ObjectKey{Name: indexName, Namespace: "default"}, &existingIndex)
+				// if err != nil {
+				// 	fmt.Println(err, "After get call")
+				// }
 				existingIndex.Status.LastUpdated = metav1.Now()
 
-				err = r.Update(ctx, &existingIndex)
-				if err != nil {
-					log.Error(err, "Error Updating the CR")
-				}
+				err = r.Status().Update(ctx, &existingIndex)
 			}
 		}
-	}
-
-	return nil
-}
-
-// +kubebuilder:rbac:groups=core.index.demo,resources=indices,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core.index.demo,resources=indices/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=core.index.demo,resources=indices/finalizers,verbs=update
-
-func (r *IndexReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
-
-	err := r.Init(ctx)
-	if err != nil {
-		log.Error(err, "Failed to initialize Index resources")
-		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil
