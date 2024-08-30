@@ -1,8 +1,23 @@
 # index
-// TODO(user): Add simple overview of use/purpose
+Index is a Custom Resource that acts as an index for the Kubernetes Cluster
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+Index provides a quick view of List of Resources across all permitted namespaces for a serviceAccount. These permissions have been derived from the Rolebindings wherein the serviceAccounts are added in the subject field.
+The content in the index can be updated accordingly to creation/ deletion of the resources as well as new permissions added to the serviceAccount via new rolebindngs OR removal of certain permissions via deletion of rolebindings.
+
+The Index structure is as follows:
+
+struct { 
+                ServiceAccount string,  
+               NamespaceMap map[string] struct{ 
+                                                 ns string, 
+                                                 Resources map[string][ ]string
+                                              }
+        }
+
+### An Example of a deployed Index:
+<img width="520" alt="image" src="https://github.com/user-attachments/assets/fc5acf0a-6846-468d-bd2c-164ae8e69dc0">
+
 
 ## Getting Started
 
@@ -90,9 +105,7 @@ kubectl apply -f https://raw.githubusercontent.com/<org>/index/<tag or branch>/d
 ```
 
 ## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
+/**NOTE:** Run `make help` for more information on all potential `make` targets
 
 More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
 
